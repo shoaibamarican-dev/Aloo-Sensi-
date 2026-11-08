@@ -1,1 +1,98 @@
+name: Build ALOO SENSI PRO APK
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Find project (folder or zip)
+        run: |
+          set -e
+          PS=$(find . -name settings.gradle -not -path './.git/*' | head -1)
+          if [ -z "$PS" ]; then
+            ZIP=$(ls -S ./*.zip 2>/dev/null | head -1)
+            if [ -z "$ZIP" ]; then echo "ERROR: repo mein na project folder hai na zip file"; ls -la; exit 1; fi
+            echo "Zip mili: $ZIP -> unzip kar raha hoon"
+            unzip -q -o "$ZIP" -d unz
+            PS=$(find unz -name settings.gradle | head -1)
+          fi
+          if [ -z "$PS" ]; then echo "ERROR: settings.gradle nahi mili"; exit 1; fi
+          PROJ=$(cd "$(dirname "$PS")" && pwd)
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "Project folder: $PROJ"
+
+      - name: Download Gradle 8.7 (retry + mirrors)
+        run: |
+          ok=0
+          for u in https://services.gradle.org/distributions/gradle-8.7-bin.zip https://downloads.gradle.org/distributions/gradle-8.7-bin.zip https://github.com/gradle/gradle-distributions/releases/download/v8.7.0/gradle-8.7-bin.zip; do
+            for t in 1 2 3; do
+              echo "Try $t: $u"
+              if curl -fL --retry 3 --retry-delay 5 -o g.zip "$u" && unzip -tq g.zip >/dev/null 2>&1; then ok=1; break 2; fi
+              sleep 5
+            done
+          done
+          if [ "$ok" != "1" ]; then echo "ERROR: Gradle download fail"; exit 1; fi
+          unzip -q g.zip -d "$HOME"
+          "$HOME/gradle-8.7/bin/gradle" --version
+
+      - name: Accept Android SDK licenses
+        run: |
+          SM="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SM" ]; then
+            yes | "$SM" --licenses > /dev/null 2>&1 || true
+            "$SM" --install "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+          else
+            echo "sdkmanager nahi mila, Gradle khud SDK sambhal lega"
+          fi
+
+      - name: Build debug APK
+        run: |
+          set -o pipefail
+          cd "$PROJ"
+          "$HOME/gradle-8.7/bin/gradle" --no-daemon --stacktrace assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Show error on Summary page
+        if: failure()
+        run: |
+          {
+            echo "## Build error (last lines)"
+            echo '```'
+            if [ -f build.log ]; then
+              grep -n -E "error:|^e: |What went wrong|FAILED|Could not|requires|not found|Execution failed" build.log | head -30
+              echo "-----"
+              tail -45 build.log
+            else
+              echo "Build tak pahunchne se pehle hi fail hua. Upar ke red step ko kholo."
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALOO-SENSI-PRO-debug-apk
+          path: ${{ env.PROJ }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          
